@@ -1,58 +1,68 @@
-from django.shortcuts import render, get_object_or_404
+from django.shortcuts import render, redirect, get_object_or_404
 from django.http import JsonResponse
 from django.db import transaction
 from .models import Account
 import csv
 from io import TextIOWrapper
-
-from django.shortcuts import render
-from django.http import JsonResponse
-import csv
-from io import TextIOWrapper
-from .models import Account
+from decimal import Decimal, InvalidOperation
+import uuid
 
 def import_accounts(request):
     if request.method == "POST" and request.FILES.get("file"):
         file = TextIOWrapper(request.FILES["file"].file, encoding="utf-8")
         csv_reader = csv.reader(file)
-        next(csv_reader)  # Skip header row if present
+        next(csv_reader)  # Skip header row
+
+        success_count = 0
+        error_count = 0
+        error_details = []  # For storing error details
 
         for row in csv_reader:
-            if len(row) < 2:
-                # Log or handle rows with insufficient data
+            if len(row) < 3:
+                error_count += 1
+                error_details.append(f"Row {csv_reader.line_num}: Incomplete data")
                 continue
-            name = row[0]
+
             try:
-                balance = float(row[1])
-            except ValueError:
-                # Log or handle rows with invalid balance data
+                account_id = uuid.UUID(row[0].strip())
+                name = row[1].strip()
+                balance = row[2].strip().replace(",", "")
+                balance = Decimal(balance)
+            except (ValueError, InvalidOperation, uuid.UUIDError) as e:
+                error_count += 1
+                error_details.append(f"Row {csv_reader.line_num}: Invalid data. Error: {e}")
                 continue
-            Account.objects.create(name=name, balance=balance)
-        return JsonResponse({"message": "Accounts imported successfully"})
+
+            try:
+                account = Account.objects.create(id=account_id, name=name, balance=balance)
+                success_count += 1
+            except Exception as e:
+                error_count += 1
+                error_details.append(f"Row {csv_reader.line_num}: Failed to create account. Error: {e}")
+
+        message = f"Imported {success_count} accounts successfully. {error_count} errors occurred."
+
+        if error_count > 0:
+            message += f"\nError details:\n" + "\n".join(error_details)
+
+        return redirect('list_accounts')
+
     return render(request, "accounts/import_accounts.html")
 
-# List All Accounts
 def list_accounts(request):
-    accounts = Account.objects.all().values("id", "name", "balance")
-    return JsonResponse(list(accounts), safe=False)
+    accounts = Account.objects.all()
+    return render(request, "accounts/list_accounts.html", {"accounts": accounts})
 
-# Get Account Information
 def account_detail(request, account_id):
     account = get_object_or_404(Account, id=account_id)
-    return JsonResponse({"id": account.id, "name": account.name, "balance": account.balance})
+    return render(request, "accounts/account_detail.html", {"account": account})
 
-# Transfer Funds
-from django.shortcuts import render, get_object_or_404
-from django.http import JsonResponse
-from django.db import transaction
-from .models import Account
-from decimal import Decimal
 @transaction.atomic
 def transfer_funds(request):
     if request.method == "POST":
         from_account_id = request.POST["from_account"]
         to_account_id = request.POST["to_account"]
-        amount = Decimal(request.POST["amount"])  # Convert amount to Decimal
+        amount = Decimal(request.POST["amount"])
 
         from_account = get_object_or_404(Account, id=from_account_id)
         to_account = get_object_or_404(Account, id=to_account_id)
